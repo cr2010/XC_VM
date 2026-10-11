@@ -1,0 +1,13 @@
+{
+    "name": "crplay-media",
+    "hash_id": "30613ca684a7c6d250d6dc7746e3f28e",
+    "description": "CRPLAY: exposes every audio and subtitle language of movies and episodes to the Xtream API (get_vod_info, get_series_info).",
+    "version": "1.0.0",
+    "requires_core": ">=2.6.5",
+    "environment": "main",
+    "priority": 0,
+    "dependencies": [],
+    "optional_dependencies": [],
+    "has_navbar": false,
+    "has_settings": false
+}
