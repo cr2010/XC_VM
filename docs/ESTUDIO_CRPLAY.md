@@ -8,8 +8,12 @@
 > cuestionó se volvieron a leer a mano (ver el PR). Si una cita se desfasa tras un
 > `git pull`, buscar el símbolo citado.
 > **Leyenda:** lo que no lleva marca se leyó en el código. **[inferido]** = deducido,
-> pendiente de probar en el laboratorio. **[no determinable]** = depende de binarios que no
-> están en el repo.
+> pendiente de probar en el laboratorio. **[no determinable]** = depende de `xcvm_core.so`
+> (extensión compilada cuyo código fuente no está en ningún repo público revisado) o solo se
+> puede saber instalando.
+> **Repos externos verificados en su estado actual (2026-10-11):**
+> `Vateron-Media/XC_VM_Fanout` en el commit `6414e5b` (código fuente de `xc_fanout` y
+> `xc_agent`). Se cita como `XC_VM_Fanout:ruta:línea`.
 
 ---
 
@@ -24,6 +28,7 @@
 - [g) Seguridad](#g-seguridad)
 - [h) Instalador: qué toca y qué descarga](#h-instalador-qué-toca-y-qué-descarga)
 - [i) Riesgos y preguntas abiertas](#i-riesgos-y-preguntas-abiertas)
+- [j) Lecciones para el diseño del control plane de CRPLAY](#j-lecciones-para-el-diseño-del-control-plane-de-crplay)
 
 ---
 
@@ -38,15 +43,15 @@ con autoload PSR-4 (`XcVm\` → `src/`). El contenido de `src/` se despliega tal
 | Componente | Qué es / versión | Origen | Cita |
 |---|---|---|---|
 | PHP | ≥ 8.1. La plataforma Composer está fijada en 8.1.33 | Bundle binario `Vateron-Media/XC_VM_Binaries` (no está en el repo) | `src/composer.json:7`, `src/composer.json:35` |
-| Extensiones PHP | ioncube, opcache, ssh2, redis, igbinary y **`xcvm_core.so`** (cerrada) | Bundle + `install_xcvm_core.sh` | `src/bin/php/lib/php.ini:1899-1905` |
+| Extensiones PHP | ioncube, opcache, ssh2, redis, igbinary y **`xcvm_core.so`** (compilada, sin código fuente público) | Bundle + `install_xcvm_core.sh` | `src/bin/php/lib/php.ini:1899-1905` |
 | PHP-FPM | 4 pools `pm = ondemand`, `max_children 4000`, por socket unix | Bundle | `src/bin/daemons.sh:2-5`, `src/bin/php/etc/1.conf:7-14` |
 | nginx | Dos binarios propios: `bin/nginx` (HTTP/HTTPS) y `bin/nginx_rtmp` (RTMP) | Bundle (versión **[no determinable]**) | `src/bin/nginx/conf/nginx.conf`, `src/bin/nginx_rtmp/conf/` |
 | MariaDB | 11.4, desde el repo oficial de MariaDB (Ubuntu 20.04 usa la 10.3 de la distro) | apt | `install:1152`, `install:1111-1139` |
 | "Redis" | En realidad es **KeyDB** (compatible con Redis), binario incluido en el repo. El binario contiene la cadena `KeyDB-6.3.4` (`grep -a KeyDB src/bin/redis/redis-server`) | `src/bin/redis/redis-server` | `docs/en/README.md:44`; opciones exclusivas de KeyDB en `src/Cli/Commands/StatusCommand.php:365-368` |
 | Bus de clúster | Segunda instancia KeyDB, solo por socket unix (MAIN) | repo | `src/bin/cluster_bus/cluster.conf:4-6` |
 | FFmpeg / ffprobe | Compilaciones 4.0, 7.1 y 8.1 por distro, descargadas de `Vateron-Media/XC_VM_FFMPEG` | GitHub releases | `src/Cli/Commands/FfmpegBuildsCommand.php:44`, `:84`, `:141` |
-| `xc_fanout` | Daemon de distribución de streams (segmentador, fan-out a clientes) | `Vateron-Media/XC_VM_Fanout` (no está en el repo) | `src/Cli/Commands/FanoutBinaryCommand.php:17-19`, `:93` |
-| `xc_agent` | Agente del clúster (API main↔LB) | `Vateron-Media/XC_VM_Fanout` | `src/bin/xc_agent/run.sh:93-114` |
+| `xc_fanout` | Daemon de distribución de streams (segmentador, fan-out a clientes). **Código fuente abierto** (Go, AGPL-3.0) en `Vateron-Media/XC_VM_Fanout` (`cmd/xc_fanout/`). Solo usa la biblioteca estándar de Go (`XC_VM_Fanout:NOTICE`) | XC_VM descarga el **binario compilado** de las releases de ese repo | `src/Cli/Commands/FanoutBinaryCommand.php:17-19`, `:93` |
+| `xc_agent` | Agente del clúster (API main↔LB). **Código fuente abierto** en el mismo repo (`cmd/xc_agent/`, `internal/clusteragent/`). Los tokens del clúster, en cambio, los emite `xcvm_core` en el MAIN (`docs/en/development/cluster-api.md:56`) | Binario compilado de las mismas releases | `src/bin/xc_agent/run.sh:93-114` |
 | yt-dlp, guess | Binarios incluidos | repo / GitHub yt-dlp | `src/Cli/Commands/YtDlpCommand.php:31-32` |
 
 Los repos externos que usa están definidos en `src/Core/Config/ConstantsInitializer.php:158-165`.
@@ -88,7 +93,7 @@ Hay dos formas de enlace, que se eligen por nodo con `mode` 0, 1 o 2
 
 1. **Legacy (mode 0, obsoleto).** El LB se conecta **directamente a MariaDB (3306) y KeyDB
    (6379) del MAIN** (`docs/en/administration/main-lb-cluster.md:13-39`). Al instalar el LB,
-   MAIN le concede acceso a la BD con `\XC_VM::db_grant()`, que está en la extensión cerrada
+   MAIN le concede acceso a la BD con `\XC_VM::db_grant()`, que está en la extensión compilada sin código fuente público
    (`src/Core/Backup/BackupService.php:130-135`). La API interna `/api` se protege con el
    secreto compartido `live_streaming_pass` más una lista de IPs
    (`src/Public/Controllers/Api/InternalApiController.php:53-61`).
@@ -169,8 +174,11 @@ abre la fuente dos veces.
   (`:105`, `:205`) y aplica una gracia `on_demand_instant_off_grace` (30 s por defecto,
   rango 3–300; `:129`).
 - **Direct proxy:** la parada la hace el propio daemon. El ajuste que le pasa PHP es
-  `fanout_grace_sec` (10 s por defecto, `src/Streaming/Fanout/FanoutConfig.php:128`). Cómo lo
-  aplica es **[no determinable]**: el daemon no está en el repo.
+  `fanout_grace_sec` (10 s por defecto, `src/Streaming/Fanout/FanoutConfig.php:128`). En el
+  código de `xc_fanout`, un *reaper* revisa cada `grace/2` y para el stream cuando no le
+  quedan espectadores y han pasado `grace_sec` desde el último acceso
+  (`XC_VM_Fanout:internal/server/server.go:797-829`, `XC_VM_Fanout:internal/defaults/defaults.go:144`,
+  `XC_VM_Fanout:docs/en/05-lifecycle.md:62-74`).
 
 ### b.3 Qué determina el tiempo de arranque
 
@@ -189,14 +197,27 @@ abre la fuente dos veces.
 
 **Conclusión [inferido]:**
 
-- **TS por fanout:** PHP entrega en cuanto existe `_0.ts`. Lo que tarda el daemon en
-  mandar el primer byte, y cómo aplica el `prebuffer`, es **[no determinable]** desde este
-  repo. La meta de **≤5 s parece alcanzable, pero hay que medirla**.
+- **TS por fanout:** PHP entrega en cuanto existe `_0.ts`. En `xc_fanout`, el `prebuffer`
+  **no es una espera**: es cuánto historial del ring se envía al entrar (`0` se respeta
+  tal cual; por defecto `0`, `XC_VM_Fanout:internal/defaults/defaults.go:141`)
+  (`XC_VM_Fanout:docs/en/03-endpoints.md:36`, `:43-45`). XC_VM le pasa `client_prebuffer`
+  (10 s): con el canal caliente, el espectador se une al ring y recibe ese historial
+  (`Hub.Join`, `XC_VM_Fanout:internal/server/server.go:2018-2022`). Con el canal frío, recibe
+  datos cuando el productor (el ffmpeg o el remuxer que lanza XC_VM, o el *puller* del daemon
+  en direct proxy) empieza a publicar; **[inferido]** el primer *frame* visible requiere
+  además el primer keyframe (primer byte ≠ primer frame). Si el *puller* del daemon
+  tiene que recurrir a un ffmpeg propio, este usa `-probesize 1000000 -analyzeduration
+  1000000` como límites de análisis de entrada (`XC_VM_Fanout:internal/puller/puller.go:859`,
+  `XC_VM_Fanout:internal/defaults/defaults.go:78-79`); eso no aplica al productor que construye
+  PHP. La meta de **≤5 s parece alcanzable, pero hay que medirla**.
 - **HLS** es el caso lento. Con productor **ffmpeg**, hay que cerrar al menos un primer
   segmento (objetivo de 2 s, ajustado a keyframes y leído a velocidad real por `-re`). Con
-  el **remuxer nativo** no se aplica `-re` (`src/Domain/Stream/StreamProcess.php:1249-1258`), y su
-  forma de segmentar es **[no determinable]**. Si el daemon necesita además su propio
-  segmento (objetivo `seg_time`=10), tardaría más: **[no determinable]**.
+  el **remuxer nativo** no se aplica `-re` (`src/Domain/Stream/StreamProcess.php:1249-1258`). El
+  HLS de `xc_fanout` es una vista sobre su ring: responde `404 no segments yet` hasta tener
+  el primer segmento (`XC_VM_Fanout:docs/en/03-endpoints.md:71`), cuyo objetivo es
+  `hls_target_sec` (6 s por defecto en el daemon, `XC_VM_Fanout:internal/defaults/defaults.go:142`).
+  XC_VM le pasa `seg_time`, que vale 10 (`src/Streaming/Fanout/FanoutConfig.php:102`, `:126`).
+  **[inferido]** Por eso el HLS en frío puede tardar alrededor de `seg_time`; hay que medirlo.
 
 ### b.4 Palancas para llegar a ≤5 s
 
@@ -234,23 +255,25 @@ propia (por ejemplo, `tools/test-stream-generator`).
 ### b.5 Requisitos para reducir el arranque on demand (meta ≤5 s)
 
 **Objetivo:** en un arranque en frío, que el cliente empiece a recibir datos en cuanto el
-productor los tenga, sin acumular buffer antes. Hoy XC_VM:
-- en el camino legacy intenta esperar a que la playlist acumule `client_prebuffer` segundos
+productor los tenga, sin acumular buffer antes. Hoy, según el camino:
+- **legacy:** intenta esperar a que la playlist acumule `client_prebuffer` segundos
   (`src/Public/stream/live.php:606-615`);
-- con fanout le pasa ese prebuffer al daemon (`src/Public/stream/live.php:486-495`);
-- en on demand sin LLOD usa un `analyzeduration` de 10 s (`src/Domain/Stream/StreamProcess.php:619`).
+- **fanout:** el prebuffer **no es una espera**, sino historial del ring (b.3); no hace
+  falta cambiar código por esto;
+- **productor ffmpeg on demand sin LLOD:** `analyzeduration` de 10 s
+  (`src/Domain/Stream/StreamProcess.php:619`). No aplica al remuxer nativo.
 
 | # | Requisito | Tipo | Dónde (XC_VM) |
 |---|---|---|---|
-| R1 | Prebuffer **0** en arranque en frío (enviar en cuanto haya datos), configurable aparte del prebuffer normal | ajuste + código mínimo | `src/Public/stream/live.php:606-615`, `src/Public/stream/live.php:486-495` |
-| R2 | `analyzeduration` on demand configurable (por ejemplo 1–2 s) en vez de 10 s fijos sin LLOD | ajuste nuevo | `src/Domain/Stream/StreamProcess.php:619` |
+| R1 | **Solo camino legacy:** prebuffer **0** en arranque en frío (enviar en cuanto haya datos), configurable aparte del prebuffer normal. Con fanout basta con medir | ajuste + código mínimo (legacy) | `src/Public/stream/live.php:606-615` |
+| R2 | **Solo productor ffmpeg:** `analyzeduration` on demand configurable (por ejemplo 1–2 s) en vez de 10 s fijos sin LLOD | ajuste nuevo | `src/Domain/Stream/StreamProcess.php:619` |
 | R3 | Probar `llod=1` en canales on demand: análisis de 0,5 s (`src/Domain/Stream/StreamProcess.php:619`) y arranque LLOD del monitor (`src/Cli/Commands/MonitorCommand.php:338-351`) | configuración | ídem |
 | R4 | Evaluar `read_native=0` (y `read_native_hls=0` si la fuente es HLS) en fuentes en vivo, y comprobar que ninguna otra condición activa `-re` | configuración | `src/Domain/Stream/StreamProcess.php:958-959` |
 | R5 | `seg_time` de 2–4 s en vez de 10 | configuración | `src/bin/install/database.sql:1780-1781` |
 | R6 | En la espera inicial sin playlist, comprobar que el primer segmento (`_0.ts` o `_0.m4s`) ya **tiene datos** y no solo que existe; antes, verificar en qué punto empieza realmente el envío | código mínimo | `src/Public/stream/live.php:260-277` |
 | R7 | **Medir** el tiempo hasta el primer byte y hasta el primer frame, con la misma fuente, antes y después de cada cambio | prueba | — |
 
-R1, R2 y R6 tocan código de upstream: hacerlo con el menor cambio posible y documentarlo en
+R1 (legacy), R2 y R6 tocan código de upstream: hacerlo con el menor cambio posible y documentarlo en
 su PR (ver `AGENTS.md`).
 
 ---
@@ -279,17 +302,20 @@ su PR (ver `AGENTS.md`).
 
 ### c.2 Qué pasa al superar `max_connections`
 
-**Por defecto, el nuevo gana: XC_VM admite la conexión nueva y cierra conexiones
-anteriores de la misma línea.** No elige "la más antigua de todas": elige por prioridad
-(misma IP+UA, luego misma IP, luego cualquiera) y, dentro de cada grupo, en orden de
-antigüedad.
+**Política por defecto: "gana el nuevo".** En las rutas que usan
+`ConnectionLimiter::closeConnections()`, cuando se supera el límite, **la conexión
+solicitante se preserva** y se intentan cerrar conexiones **anteriores**, priorizando
+misma IP+User-Agent, luego misma IP y finalmente cualquier conexión elegible. Dentro de cada
+grupo, en orden de antigüedad. Hay excepciones que sí rechazan al nuevo (ver abajo), y
+otras rutas (el agente del clúster, el cron) aplican su propia lógica.
 
 - `StreamAuth::validateConnections()` se llama **después** de registrar la conexión
   (`src/Streaming/Auth/StreamAuth.php:111-134`).
 - `ConnectionLimiter::closeConnections()` (`src/Streaming/Protection/ConnectionLimiter.php:45-184`) calcula
-  `count - max` (`:61`, `:81`) y cierra primero las conexiones con la **misma IP+UA**, luego
-  las de la misma IP y luego cualquiera (`:93-101`). Solo cierra conexiones **más antiguas**
-  que la que pide (`:103-112`).
+  el excedente `count - max` (`:61`, `:81`) y cierra primero las conexiones con la **misma
+  IP+UA**, luego las de la misma IP y luego cualquiera (`:93-101`). No cierra la conexión
+  que pide. Cuando encuentra su uuid en la lista ordenada, solo considera las conexiones
+  **anteriores** a ella (`:103-112`); si no lo encuentra, esa frontera no se establece.
 - Se llama en:
   - live HLS (`src/Public/stream/live.php:375`) y live TS (`src/Public/stream/live.php:454`);
   - VOD (`src/Public/stream/vod.php:189`);
@@ -372,18 +398,32 @@ mismo NAT (misma IP) y con el mismo UA, el sistema no distingue un aparato de ot
    los LB.
 2. **Comprobación previa en `auth.php`**, después de validar la línea y antes del
    `switch ($rType)` (`src/Public/stream/auth.php:530`):
-   - Contar las conexiones abiertas de la línea **excluyendo las del mismo aparato** (misma
-     IP+UA), para no romper el zapping ni las peticiones `Range`.
+   - Contar las conexiones abiertas de la línea **excluyendo las del mismo aparato**, para
+     no romper el zapping ni las peticiones `Range`. Ojo: IP+UA es solo una **heurística**
+     de "mismo aparato": varios aparatos detrás del mismo NAT con la misma app parecen uno
+     (c.4). Para un límite fiable hace falta una identidad de sesión/dispositivo
+     verificable (ver j.2).
    - Si el resultado es `>= max_connections`, registrar `USER_ALREADY_CONNECTED` y llamar a
      `OffAirHandler::showVideoServer('show_connected_video', 'connected_video_path', $ext, …)`,
      con el mismo patrón que se usa para "expirado" en `src/Public/stream/auth.php:351-358`.
 3. **Comprobación definitiva** en `src/Public/stream/live.php:357` y `src/Public/stream/live.php:431`,
    `src/Public/stream/vod.php:161`, `src/Public/stream/timeshift.php:166` y `src/Public/stream/timeshift.php:239`,
-   justo antes de registrar la conexión. **Ojo:** comprobar y luego registrar no es
-   atómico, así que dos peticiones simultáneas podrían pasar las dos. Para garantizarlo
-   hace falta que contar y registrar sea una sola operación en el almacén autoritativo
-   (por ejemplo, un script Lua en Redis o una reserva serializada por línea, como ya hace
-   `ConnectionAdmission` con `RESV#`, `src/Domain/Cluster/ConnectionAdmission.php:610-621`).
+   justo antes de registrar la conexión.
+
+   > ⚠️ **La admisión tiene que ser ATÓMICA.** No basta con "1) contar conexiones; 2) si
+   > hay hueco, registrar": entre los dos pasos, dos peticiones simultáneas pueden pasar
+   > ambas (condición de carrera). Hace falta una sola operación
+   > **RESERVAR SLOT + REGISTRAR/CONFIRMAR CONEXIÓN** por línea, sobre el almacén
+   > autoritativo. Opciones: un script **Redis Lua**, un lock o reserva por usuario, un
+   > **servicio de admisión central** o un algoritmo equivalente con *compare-and-set*.
+   > XC_VM ya tiene una pieza parecida: `ConnectionAdmission` reserva con `RESV#`
+   > (`src/Domain/Cluster/ConnectionAdmission.php:610-621`).
+   >
+   > Para CRPLAY se recomienda **separar esta lógica del motor de video**:
+   > `petición Xtream/API` → `autenticación` → `admisión de conexión` → si se permite:
+   > crear sesión/token de reproducción → motor de video → *heartbeat*/liberación.
+   > Si la línea está llena: **no matar al cliente anterior** y responder al nuevo con el
+   > video/playlist de "máximo de conexiones alcanzado".
 4. **Desactivar el "gana el nuevo"** cuando el modo sea `reject_new`. Los puntos que lo
    aplican son:
    - `StreamAuth::validateConnections` (`src/Streaming/Auth/StreamAuth.php:111-134`);
@@ -436,14 +476,17 @@ cualquier contacto con `Vateron-Media/XC_VM` requiere autorización expresa de G
   (`src/Cli/CronJobs/VodCronJob.php:119-120`). El comando es
   `ffprobe -probesize … -analyzeduration … -i <fichero> -v quiet -print_format json
   -show_streams -show_format` (`src/Streaming/Codec/FFprobeRunner.php:24`).
-- El parser `parseFFProbe` (`src/Streaming/Codec/FFprobeRunner.php:46-57`):
-  - **audio y video: solo guarda la PRIMERA pista** (`:48-51`). Las demás pistas de audio
-    siguen en el fichero, pero **sus metadatos (idioma, códec) se descartan** en el
-    resultado del parser;
-  - **subtítulos: guarda TODAS las pistas**, con `tags.language` (`:53-57`).
+- XC_VM ejecuta ffprobe con `-show_streams`, así que **recibe todas las pistas**. Sin
+  embargo, `parseFFProbe()` (`src/Streaming/Codec/FFprobeRunner.php:46-57`) solo conserva en
+  `codecs` el **primer** stream de audio y el **primer** stream de video (`:48-51`),
+  mientras que los subtítulos sí se guardan como lista (`:53-57`). Por tanto, **los
+  metadatos (idioma, códec) de las pistas de audio adicionales se descartan durante el
+  parseo**. La pérdida ocurre en el parser de XC_VM, no en ffprobe, y las pistas siguen en
+  el fichero.
 - El resultado se guarda en `movie_properties`: `video` (`src/Cli/CronJobs/VodCronJob.php:164`),
   `audio` (`:167`) y `subtitle`, este último solo si `extract_subtitles` está activo
-  (`:169-171`). También se guarda completo en `streams_servers.stream_info` (`:200`).
+  (`:169-171`). También se guarda en `streams_servers.stream_info` (`:200`) el resultado
+  **ya parseado**, que tampoco incluye los audios adicionales.
 - **Cuidado:** `TmdbCron` **reescribe `movie_properties` completo** con `audio: []` y
   `video: []` (`src/Domain/Vod/TmdbCron.php:283-284`, `:297-303`; episodios en `:532-547`).
   Cualquier dato extra que guardemos ahí se pierde en el siguiente refresco de TMDb.
@@ -660,10 +703,10 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
 |---|---|---|---|
 | 80 / 443 (se preguntan al instalar) | nginx: panel, streaming, API XC, `/cluster/v1/` | Público | `src/bin/nginx/conf/ports/http.conf:1`, `src/bin/nginx/conf/ports/https.conf:1`, `install:2171-2198` |
 | 8880 | RTMP | Público | `src/bin/nginx_rtmp/conf/port.conf:1` |
-| 3306 | MariaDB | **Escucha en todas las interfaces**; que sea alcanzable depende del firewall | `install:274`, `install:1274` |
-| 6379 | KeyDB | **`bind *`**, con contraseña de 512 caracteres; alcanzable según el firewall | `src/bin/redis/redis.conf:1-3`, `src/Cli/Commands/StatusCommand.php:375-383` |
+| 3306 | MariaDB | **Escucha en todas las interfaces** (`bind-address = *` y `0.0.0.0`). Escuchar no es lo mismo que estar accesible desde internet: eso depende del firewall del host o del proveedor | `install:274`, `install:1274` |
+| 6379 | KeyDB | **`bind *`**, `port 6379`, `protected-mode yes`, `requirepass` de 512 caracteres y comandos peligrosos desactivados (`CONFIG`, `DEBUG`, `SHUTDOWN`, `SLAVEOF`, `REPLICAOF`, `MIGRATE`, `MODULE`). Reduce el riesgo, pero **no sustituye un firewall** | `src/bin/redis/redis.conf:1-3`, `:25`, `:59-65`, `src/Cli/Commands/StatusCommand.php:375-383` |
 | 31210 | Control y estadísticas de RTMP | Escucha en todas las interfaces (`listen 31210`), pero nginx solo **permite** 127.0.0.1 (`allow 127.0.0.1; deny all`) | `src/bin/nginx_rtmp/conf/nginx.conf:29-33` |
-| 31290 | Proxy local de `xc_agent` | PHP lo usa en `127.0.0.1`; dónde escucha el agente es **[no determinable]** (binario externo) | `src/Core/Cluster/DataPlane.php:49-50` |
+| 31290 | Proxy local de `xc_agent` | Solo `127.0.0.1` (`XC_VM_Fanout:internal/clusteragent/relayproxy.go:66`) | `src/Core/Cluster/DataPlane.php:49-50` |
 | `cluster_api_port` (opcional) | API de clúster en un puerto aparte | Lo genera la configuración en `cluster.d/`; **[no determinable]** sin instalar | `src/bin/nginx/conf/nginx.conf:537-540` |
 
 **Endpoints públicos:**
@@ -688,7 +731,9 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
 
 **Riesgos de diseño:**
 
-1. **3306 y 6379 abiertos a internet** si no se pone un firewall. En `install` no hay
+1. **MariaDB (3306) y KeyDB (6379) quedan escuchando en todas las interfaces.** Si no hay
+   un firewall del host o del proveedor, ni una ACL externa, los puertos **podrían** quedar
+   accesibles desde redes no deseadas (escuchar ≠ estar accesible). En `install` no hay
    ninguna llamada a ufw, iptables ni ipset: solo aparecen como nombres de paquetes
    (`install:48`, `:235`). El cron de root sí gestiona después las listas de bloqueo de ipset
    (`src/Cli/CronJobs/RootSignalsCronJob.php:271`, `:316`), pero eso no filtra puertos.
@@ -700,18 +745,28 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
 3. Las credenciales de las líneas viajan en la URL y se guardan en texto plano. Quedan en
    logs y proxies, sobre todo con HTTP sin TLS. Es lo normal en el protocolo XC, pero hay que
    tenerlo presente.
-4. Hay **componentes cerrados**:
-   - `xcvm_core.so` gestiona la BD, el restore, las licencias, los módulos y los grants
-     (`src/bin/php/lib/php.ini:1905`). Se descarga de la rama `main` de
+4. **Componentes compilados: hay que distinguirlos.**
+   - **Entre los componentes revisados, `xcvm_core.so` es la única pieza de Vateron Media
+     sin código fuente público localizado.** Es una extensión
+     compilada cuyo código no está en XC_VM ni en los repos públicos revisados, así que su
+     funcionamiento interno no se puede auditar (`src/bin/php/lib/php.ini:1905`). Interviene
+     en la conexión a BD y Redis (`\XC_VM::db_connect`, `redis_connect`, `config_pack`), el
+     restore, los grants de BD de los LB, las licencias, los módulos y los tokens del clúster
+     (`docs/en/development/cluster-api.md:56`). Se descarga de la rama `main` de
      `Vateron-Media/XC_VM_Binaries` (`src/bin/install/install_xcvm_core.sh:16-25`).
-   - El loader de ionCube (`src/bin/php/lib/php.ini:1899`).
-   - Los daemons `xc_fanout` y `xc_agent`: se descargan como binarios
-     (`src/Cli/Commands/FanoutBinaryCommand.php:17-19`) y **su código no está en este repo**.
-     No verificamos si su fuente es pública en otro repositorio.
+   - El loader de **ionCube** (`src/bin/php/lib/php.ini:1899`), un componente de terceros
+     sin código público.
+   - **`xc_fanout` y `xc_agent` NO son cerrados:** su código fuente Go es público (AGPL-3.0)
+     en `Vateron-Media/XC_VM_Fanout` (`cmd/xc_fanout/`, `cmd/xc_agent/`). Lo que sí existe es
+     un **riesgo de cadena de suministro**: en producción XC_VM descarga **binarios
+     compilados** de las releases de ese repo (`src/Cli/Commands/FanoutBinaryCommand.php:17-19`,
+     `:93`), verificados con un `SHA256SUMS` del mismo release (`:241-247`). Nada garantiza
+     por sí solo que el binario corresponda al código publicado: habría que compilarlo
+     nosotros (`XC_VM_Fanout:release.sh`) y comparar.
 5. **"Phone home":**
    - Servidor de licencias: según el README, una instalación con el crédito visible **no lo
      contacta nunca**; la guía de licencias dice lo contrario. Ver **g.4**: la decisión real
-     está en código cerrado.
+     está en `xcvm_core.so` (sin código fuente público).
    - Actualizaciones desde GitHub (`src/Core/Updates/GitHubReleases.php:88`).
    - Resolver DNS 1.1.1.1 (`src/bin/nginx/conf/nginx.conf:81`).
 6. **Integridad de las descargas:** se comprueba con MD5 o SHA256 publicados **en el mismo
@@ -778,17 +833,17 @@ verificación diaria.
     (`src/Cli/Commands/ServerInstallCommand.php:120-121`).
   El código ejecutable, en cambio, no distingue entre comunidad y white-label: rechaza el LB
   siempre que `licensed()` sea falso (`src/Cli/Commands/ServerInstallCommand.php:124-129`).
-- **El veredicto lo da código cerrado.** `licensed()` devuelve lo que diga
+- **El veredicto lo da código sin fuente pública.** `licensed()` devuelve lo que diga
   `\XC_VM::license_valid()` de la extensión `xcvm_core` (`src/Core/License/LicenseGate.php:67-68`).
   **Si la extensión o ese método no están, devuelve `true`** (`src/Core/License/LicenseGate.php:71`).
   La comprobación del crédito llama a `\XC_VM::verify_branding()`
   (`src/Core/Integrity/AttributionGuard.php:58-59`). Según el comentario de
   `src/Cli/Commands/ServerInstallCommand.php:122-123`, el permiso de BD de los LB lo da
-  `\XC_VM::db_grant()`, también cerrado. Desde el repo **no se puede confirmar** qué hacen.
+  `\XC_VM::db_grant()`, también en `xcvm_core.so`. Desde el repo **no se puede confirmar** qué hacen.
 - El encabezado de la misma clase da una tercera versión: clave ligada al HWID,
   revalidación **semanal** y **7 días** de gracia sin conexión
   (`src/Core/License/LicenseGate.php:12-14`).
-- La licencia controla **también el daemon `xc_fanout`**, y no solo los LB. Sin licencia,
+- La licencia controla **también el uso del daemon `xc_fanout`**, y no solo los LB. Si `licensed()` devuelve `false`,
   la entrega en vivo cae al camino legacy (`src/Core/License/LicenseGate.php:42-51`,
   `src/Public/stream/live.php:131`, `src/Domain/Stream/StreamProcess.php:1540`). Ni el README
   (que sí habla del fanout, pero solo de su consumo de RAM, `README.md:270-288`) ni la guía
@@ -796,24 +851,44 @@ verificación diaria.
 - `php.ini` tiene una directiva `xcvm_core.server_url` con un valor ofuscado
   (`src/bin/php/lib/php.ini:1910`). Qué hace la extensión con ella no es verificable.
 
-**Conclusión:**
-- Por fechas y por los comentarios del código, **la guía parece desactualizada respecto al
-  README**: crédito visible = gratis con LB; clave solo para white-label. Lo que hace de
-  verdad `xcvm_core` **sigue sin verificar**.
-- Que una instalación comunitaria **no** contacte el servidor de licencias **no es
-  verificable** desde el código: depende de `xcvm_core`.
-- **Cómo verificarlo en el laboratorio:** instalar sin clave, con el crédito intacto, y:
-  1. comprobar que `xcvm_core` está cargada y que `\XC_VM::license_valid()` existe, y
-     consultar su resultado directamente. Sin la extensión, `licensed()` devuelve `true` y
-     la falta del banner de activación (`src/Public/Views/admin/dashboard.php:76`) no
-     demostraría nada;
-  2. capturar el tráfico saliente (DNS y TLS hacia `xcvm.tech` u otros) durante al menos
-     **8 días**, para cubrir una posible revalidación semanal. Ojo: no ver tráfico durante
-     ese tiempo no prueba que "nunca" contacte;
-  3. añadir un LB de prueba;
-  4. comprobar que la entrega usa fanout.
-- Mientras no se verifique, **no se puede dar por hecho** que los LB funcionarán sin clave
-  ni que no habrá contacto externo.
+**Conclusión: comportamiento [no determinable desde el código PHP público].**
+
+> El README, la guía de licencias y algunos comentarios del código no son del todo
+> coherentes. Los comentarios del PHP visible describen que una instalación comunitaria con
+> el crédito intacto se considera válida, mientras que `licensing-and-activation.md` describe una clave de
+> activación para las funciones con varios servidores. La decisión real depende de
+> `XC_VM::license_valid()`, implementada en `xcvm_core.so`; por tanto, **el comportamiento
+> exacto hay que comprobarlo en el laboratorio**.
+
+- No se da ninguna de las dos versiones por cierta. Por las fechas del último commit de
+  cada fichero en upstream (`git log -1 -- README.md`: 05-10-2026;
+  `git log -1 -- docs/en/info/licensing-and-activation.md`: 23-09-2026) y por los comentarios
+  del PHP, **la guía parece desactualizada**, pero eso no prueba lo que hace la extensión.
+- **No es un hecho que sin licencia no funcionen los LB:** queda como riesgo y pregunta
+  abierta (R3).
+
+**Prueba de laboratorio propuesta** (dos ensayos comparables, cada uno con instalación
+limpia, crédito intacto y sin clave de activación):
+
+0. **En ambos ensayos, antes de nada:** comprobar que `xcvm_core` está cargada y que
+   `\XC_VM::license_valid()` existe. Sin la extensión, `licensed()` devuelve `true` y la
+   falta del banner de activación (`src/Public/Views/admin/dashboard.php:76`) no
+   demostraría nada. Capturar el tráfico saliente (DNS/HTTP/HTTPS) **desde el primer
+   arranque**.
+1. **Ensayo A, conectado:** sin bloquear nada.
+2. **Ensayo B, bloqueado desde el primer arranque:** bloquear la salida hacia el servidor
+   de licencias (`xcvm.tech`, `www.xcvm.tech` y cualquier otro destino que aparezca en la
+   captura del ensayo A), y comprobar que el bloqueo es efectivo.
+3. En los dos: intentar añadir un LB.
+4. Comprobar en los dos:
+   - si se crea el LB;
+   - si sigue funcionando a las 24 y 48 h, a los 8 días (posible revalidación semanal) y
+     a los **15 días** (la guía habla de una ventana de 14 días);
+   - el resultado de `LicenseGate::licensed()` y de `\XC_VM::license_valid()`, consultados
+     directamente;
+   - si la entrega en vivo usa el fanout;
+   - el tráfico saliente relacionado con licencias. Ojo: no ver tráfico durante la prueba no
+     demuestra que "nunca" lo haya.
 ---
 
 ## h) Instalador: qué toca y qué descarga
@@ -836,9 +911,9 @@ verificación diaria.
 | Repo de MariaDB | **`curl https://r.mariadb.com/downloads/mariadb_repo_setup \| bash`** | Ninguna | `install:1152` |
 | PPA de MaxMind (solo Ubuntu) | `ppa:maxmind/ppa` | apt | `install:1170` |
 | Bundle de binarios (PHP, nginx) | `github.com/Vateron-Media/XC_VM_Binaries/releases/.../ubuntu_24.tar.gz` | MD5 del mismo release | `install:505-634` |
-| `xcvm_core.so` (cerrado) | `raw.githubusercontent.com/Vateron-Media/XC_VM_Binaries/main/bin/xcvm_extention` | SHA256 del mismo sitio | `src/bin/install/install_xcvm_core.sh:16-27` |
+| `xcvm_core.so` (compilado, **sin código fuente público**) | `raw.githubusercontent.com/Vateron-Media/XC_VM_Binaries/main/bin/xcvm_extention` | SHA256 del mismo sitio | `src/bin/install/install_xcvm_core.sh:16-27` |
 | FFmpeg | `Vateron-Media/XC_VM_FFMPEG` releases | MD5 | `src/Cli/Commands/FfmpegBuildsCommand.php:84`, `:172-174` |
-| `xc_fanout` / `xc_agent` | `Vateron-Media/XC_VM_Fanout` releases | SHA256SUMS | `src/Cli/Commands/FanoutBinaryCommand.php:93`, `:241-247` |
+| `xc_fanout` / `xc_agent` (binarios compilados de **código abierto**, AGPL) | `Vateron-Media/XC_VM_Fanout` releases | SHA256SUMS del mismo release | `src/Cli/Commands/FanoutBinaryCommand.php:93`, `:241-247` |
 | GeoLite2 | Release de `XC_VM_Update`, o `download.maxmind.com` si hay credenciales | — | `src/Core/GeoIP/GeoLiteReleaseUpdater.php:30`, `src/Core/GeoIP/MaxMindUpdater.php:23` |
 | Proxy | `Vateron-Media/XC_VM_Proxy` | — | `install:2459-2463` |
 
@@ -911,26 +986,27 @@ SHA-1, aceptando la primera que ve o una fijada (TOFU, `src/Cli/Commands/ServerI
 
 | # | Riesgo | Impacto | Sección |
 |---|---|---|---|
-| R1 | MariaDB 3306 y KeyDB 6379 escuchan en todas las interfaces y no hay firewall | Alto | g.2, h.3 |
-| R2 | Dependencia de binarios cuyo código no está en este repo: `xcvm_core.so`, ionCube, `xc_fanout`, `xc_agent`. No los podemos auditar desde aquí y vienen de `main`/`latest` sin firma | Alto | g.3, h.2 |
-| R3 | **Licencia contradictoria y no verificable:** el README dice que con el crédito visible los LB son gratis y no hay contacto externo; la guía exige una clave y una verificación diaria. El veredicto lo da código cerrado (`xcvm_core`), que también controla el daemon fanout. Si el modelo cambia, los LB y el fanout podrían dejar de funcionar | Alto | g.4 |
+| R1 | MariaDB 3306 y KeyDB 6379 escuchan en todas las interfaces y el instalador no gestiona ningún firewall: **exposición potencial** si tampoco hay firewall del proveedor | Medio | g.2, g.3, h.3 |
+| R2 | **Dependencia de `xcvm_core.so`** (más ionCube), que entre los componentes revisados es la única pieza de Vateron Media sin código fuente público localizado: BD, Redis, grants, licencias y tokens del clúster pasan por ella. Aparte, hay riesgo de **cadena de suministro** de binarios compilados que se descargan de `main`/`latest` sin firma: `xcvm_core.so`, bundle de PHP/nginx, ffmpeg, y `xc_fanout`/`xc_agent` (estos dos **sí** con código público en `XC_VM_Fanout`) | Medio | g.3, h.2 |
+| R3 | **Licencia: documentación contradictoria y comportamiento [no determinable desde el código PHP público]:** el README dice que con el crédito visible los LB son gratis y no hay contacto externo; la guía exige una clave y verificación diaria. La decisión está en `xcvm_core.so`, que también controla el uso del fanout. **No es un hecho que sin licencia no funcionen los LB**: hay que comprobarlo en el laboratorio (prueba en g.4) | Medio (pendiente de prueba) | g.4 |
 | R4 | El instalador es invasivo: sobrescribe configs de `/etc`, desactiva apache y el nginx del sistema, hace `curl\|bash` y deja `chattr +i`. Al instalar un LB, además desactiva AppArmor | Medio | h.3 |
 | R5 | La política "gana el nuevo" permite compartir cuentas por turnos (*ping-pong*) y no muestra el video de conexiones sobrepasadas | Medio (negocio) | c |
 | R6 | HLS on demand puede tardar más de 5 s y responder "not on air" en el primer intento | Medio (negocio) | b |
-| R7 | Solo se guarda la primera pista de audio, y TMDb borra los datos de pistas al refrescar | Bajo/Medio | d |
-| R8 | La migración desde XUI borra el admin inicial, no copia ajustes ni LB, y descarta columnas en silencio | Medio | f |
+| R7 | Solo se conservan los **metadatos** del primer stream de audio (el parser descarta los demás), y TMDb borra los datos de pistas al refrescar | Bajo/Medio | d |
+| R8 | La migración desde XUI borra el admin inicial, no copia la mayoría de los ajustes (solo `server_name` y `default_timezone`) ni los LB, y descarta columnas en silencio | Medio | f |
 | R9 | Usuario de BD con `ALL ON mysql.*` | Medio | g.3 |
 | R10 | Varios cambios deseados (límite de conexiones, idiomas) tocan código de upstream y ponen en riesgo la sincronización | Medio | c.5, d.4 |
-| R11 | **PHP 8.1 está fuera de soporte de seguridad desde el 31-12-2025** (https://www.php.net/eol.php). Composer simula la plataforma 8.1.33 (`src/composer.json:35`); la versión que se ejecuta de verdad viene del bundle de `XC_VM_Binaries` (ver a.1 y h.2) y hay que confirmarla en el laboratorio. Si es 8.1, pedir o preparar un bundle con una versión con soporte (8.3+) | Alto (si se confirma) | a.1 |
+| R11 | **PHP 8.1 está fuera de soporte de seguridad desde el 31-12-2025** (https://www.php.net/eol.php). Composer declara la plataforma 8.1.33 (`src/composer.json:35`) y el README también dice PHP 8.1.33 (`README.md:88`). La versión que se ejecuta de verdad viene del bundle de `XC_VM_Binaries` (ver a.1 y h.2). Prueba de laboratorio: `/home/xc_vm/bin/php/bin/php -v` y guardar la versión exacta. Si es 8.1, pedir o preparar un bundle con una versión con soporte (8.3+) | **Alto solo si el runtime instalado es 8.1** | a.1 |
 
 ### Preguntas abiertas
 
 1. **Licencia:** ¿aceptamos mantener visible el crédito de Vateron Media? Según el README,
    así los LB son gratis y no hay contacto externo, pero hay que verificarlo en el
-   laboratorio (g.4). ¿Necesitamos white-label? En ese caso hace falta una clave y el panel
-   contacta `xcvm.tech`.
-2. **Topología:** ¿cuántos LB tendremos? ¿Usaremos la API de clúster (recomendada: no expone
-   3306/6379) o el modo legacy?
+   laboratorio (g.4). ¿Necesitamos white-label? **Según el README**, en ese caso hace falta
+   una clave y el panel contacta `xcvm.tech` (no verificado).
+2. **Topología:** ¿cuántos LB tendremos? ¿Usaremos la API de clúster o el modo legacy? La API
+   de clúster permite que los LB no necesiten acceso remoto a 3306/6379, pero los servicios
+   siguen escuchando: hay que cerrarlos con firewall (`cluster:db-allowlist` viene apagado).
 3. **Formato de entrega:** ¿nuestras apps usan TS o HLS? Esto decide si llegar a ≤5 s es
    fácil (TS) o requiere cambios (HLS).
 4. **Fuentes:** ¿de qué tipo son los canales on demand (HTTP-TS, HLS, UDP)? ¿Cuál es su GOP?
@@ -942,13 +1018,35 @@ SHA-1, aceptando la primera que ve o una fijada (TOFU, `src/Cli/Commands/ServerI
    `get_vod_info`? ¿Qué nombre de campo esperan para los idiomas de audio?
 7. **Migración:** ¿podemos conseguir un dump de XUI.one **anonimizado** para ensayar? ¿Qué
    versión de XUI.one usamos?
-8. **Código cerrado:** ¿aceptamos depender de `xcvm_core.so` y de los daemons cerrados? ¿Hay
+8. **Código sin fuente pública:** ¿aceptamos depender de `xcvm_core.so`? (`xc_fanout` y
+   `xc_agent` sí tienen el código publicado en `XC_VM_Fanout`). ¿Hay
    que pedirle a upstream su código o una alternativa (con tu autorización)?
 9. **Upstream (requiere tu autorización, según `AGENTS.md`):** ¿proponemos a Vateron-Media
    los cambios genéricos (pistas de audio, modo de límite) para no cargar con parches
    propios? ¿Reportamos en privado los hallazgos de seguridad de g.3?
 10. **Pruebas:** ¿qué medición de arranque tomamos como referencia? Por ejemplo, el tiempo
     hasta el primer frame en la app, no hasta el primer byte.
+
+### Tabla de hallazgos revisada (severidades)
+
+Revisada el 2026-10-11 tras la revisión independiente de ChatGPT. Las dos primeras filas
+son **errores de redacción del propio estudio, ya corregidos**; el resto son **riesgos
+vigentes** del sistema. Es una **selección**: la lista completa de riesgos es la tabla
+R1–R11 de arriba (R6, R8, R9 y R10 no se repiten aquí).
+
+| Severidad | Hallazgo | Estado | Sección |
+|---|---|---|---|
+| **ALTA** (error del estudio) | `xc_fanout` / `xc_agent` descritos como binarios cerrados o "no determinables" | **Corregido:** su código Go es público (AGPL) en `XC_VM_Fanout`; entre los componentes revisados, lo único sin código fuente público localizado es `xcvm_core.so` (+ ionCube, de terceros) | a.1, b, g.3, h.2, R2 |
+| **ALTA** (error del estudio) | Licencia descrita como certeza cuando el propio proyecto se contradice y la decisión está en `xcvm_core.so` | **Corregido:** queda como [no determinable desde el código PHP público], con una prueba de laboratorio | g.4, R3 |
+| MEDIA | Exposición potencial de MariaDB/KeyDB: escuchan en todas las interfaces y el instalador no gestiona ningún firewall | Riesgo vigente: firewall antes de instalar | g.2, g.3, R1 |
+| MEDIA | Política "gana el nuevo" (permite compartir cuentas por turnos y no muestra el video al nuevo) | Riesgo de negocio | c.2, R5 |
+| MEDIA | Condición de carrera si se implementa `reject_new` sin una operación atómica | Recomendación de diseño: admisión atómica | c.5 |
+| MEDIA | Dependencia de `xcvm_core.so` (BD, Redis, grants, licencias, tokens del clúster) | Riesgo vigente | g.3, R2 |
+| MEDIA | Cadena de suministro: binarios compilados (`xcvm_core.so`, bundle PHP/nginx, ffmpeg, `xc_fanout`/`xc_agent`) descargados de `main`/`latest` sin firma | Riesgo vigente: fijar versiones y verificar | h.2, R2 |
+| MEDIA | Instalador invasivo (`/etc`, `curl\|bash`, `chattr +i`, AppArmor en LB) | Riesgo vigente: snapshot + revisión | h.3, R4 |
+| ALTA solo si el runtime instalado es 8.1 (pendiente) | PHP 8.1 sin soporte de seguridad desde el 31-12-2025 | Pendiente: `php -v` en el laboratorio | R11 |
+| BAJA/MEDIA | Pérdida de los metadatos de las pistas de audio adicionales (en el parser, no en ffprobe) | Confirmado | d.2, R7 |
+| BAJA/MEDIA | Discrepancias documentales del proyecto (licencia; README frente a guías) | Documentado | g.4 |
 
 ### Próximos pasos propuestos (requieren aprobación)
 
@@ -960,3 +1058,65 @@ SHA-1, aceptando la primera que ve o una fijada (TOFU, `src/Cli/Commands/ServerI
 4. Probar `tools/test_player_api.sh` y nuestras apps contra el laboratorio.
 5. Diseñar el módulo `crplay_media` (idiomas) y el ajuste `connection_limit_mode` (límite),
    cada uno en su propia rama y su propio PR.
+
+---
+
+## j) Lecciones para el diseño del control plane de CRPLAY
+
+Resumen de lo más útil de este estudio para el panel propio de CRPLAY. **Son ideas, no
+código:** no se copia nada de XC_VM.
+
+### j.1 Separar el plano de control del plano de video
+
+El sistema de CRPLAY no debería depender de internals de XC_VM.
+
+- **Plano de control CRPLAY:** API Xtream, autenticación, usuarios, paquetes, límite de
+  conexiones, sesiones, dispositivos, idiomas/metadatos, CRM, enrutamiento y observabilidad.
+- **Plano de video intercambiable:** Flussonic, XC_VM, nginx + FFmpeg, MediaMTX, u otro
+  motor futuro.
+
+### j.2 No modelar "una conexión = un cambio de canal"
+
+Para que el zapping no cuente doble, separar dos conceptos:
+- **sesión de dispositivo**;
+- **reproducción activa**.
+
+Una sesión de dispositivo puede cambiar de canal sin consumir dos slots a la vez si ese
+dispositivo ya tenía uno reservado. XC_VM se acerca en HLS con una clave fija por
+línea+canal+IP+UA (c.4), pero sigue siendo por canal.
+
+### j.3 Servicio de admisión de conexiones
+
+Central y **atómico** (ver c.5). Estados sugeridos: `RESERVED` → `ACTIVE` → `CLOSING` →
+`EXPIRED`, con TTL y *heartbeats*.
+
+### j.4 Redis para el estado efímero; SQL para el histórico
+
+Opción recomendada: no usar una tabla SQL tipo `lines_live`/`lines_activity` como único
+estado operativo de las conexiones en tiempo real.
+- **Redis:** sesiones activas, slots, *heartbeats*, locks, TTL.
+- **SQL:** historial, auditoría, analítica.
+
+SQL también puede hacer una admisión transaccional; Redis se recomienda por latencia y TTL
+nativos, siempre que se definan su consistencia (persistencia, réplica) y cómo se recupera
+tras un fallo.
+
+### j.5 Fail-open o fail-closed
+
+Definir desde el principio qué pasa si:
+- cae Redis;
+- el main no responde;
+- el motor de video no responde;
+- un LB pierde la comunicación.
+
+Para un límite estricto de conexiones, el servicio de admisión probablemente debe ser
+**fail-closed** para no acabar con cientos de conexiones sin contar. Unos *leases* locales
+"muy acotados" no bastan por sí solos para un límite global estricto: harían falta cupos
+globales preasignados por nodo, con garantías de que no se dupliquen. XC_VM ofrece varias políticas, por ejemplo `lb_offline_admission`
+(`docs/adr/0004-cluster-api.md:1102`, `:1118-1122`).
+
+### j.6 La API Xtream como contrato
+
+No copiar los internals de XC_VM. Tratar `player_api.php`, `get.php`, `xmltv.php`, `/live`,
+`/movie` y `/series` como un **contrato externo**, y crear pruebas de compatibilidad contra
+las apps reales de CRPLAY.
