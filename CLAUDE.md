@@ -93,3 +93,7 @@ Issues and specs live as GitHub issues in `Vateron-Media/XC_VM` (via the `gh` CL
 ### Domain docs
 
 Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Fork CRPLAY (cr2010/XC_VM)
+
+@AGENTS.md
