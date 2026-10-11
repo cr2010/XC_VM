@@ -709,9 +709,9 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
      (`src/Cli/Commands/FanoutBinaryCommand.php:17-19`) y **su código no está en este repo**.
      No verificamos si su fuente es pública en otro repositorio.
 5. **"Phone home":**
-   - Servidor de licencias: "una vez al día" según la documentación
-     (`docs/en/info/licensing-and-activation.md:47`). Sin licencia no se pueden instalar LB:
-     `server:install` lo rechaza (`src/Cli/Commands/ServerInstallCommand.php:124-129`).
+   - Servidor de licencias: según el README, una instalación con el crédito visible **no lo
+     contacta nunca**; la guía de licencias dice lo contrario. Ver **g.4**: la decisión real
+     está en código cerrado.
    - Actualizaciones desde GitHub (`src/Core/Updates/GitHubReleases.php:88`).
    - Resolver DNS 1.1.1.1 (`src/bin/nginx/conf/nginx.conf:81`).
 6. **Integridad de las descargas:** se comprueba con MD5 o SHA256 publicados **en el mismo
@@ -745,6 +745,75 @@ Reportarlos a upstream (por ejemplo, con un GitHub Security Advisory privado) **
 autorización de Gilberth**: `AGENTS.md` prohíbe abrir PRs o issues en
 `Vateron-Media/XC_VM`.
 
+
+### g.4 Licencia: el README contradice la guía; qué dice el código
+
+**Lo que dice el README** (versión del 05-10-2026):
+- "100% free. No license checks. No server locks." (`README.md:55`).
+- Con el crédito "Vateron Media · AGPL-3.0" visible, todo es gratis y todo funciona,
+  **incluidos los balanceadores** (`README.md:359-362`).
+- Solo un **white-label** (crédito quitado) necesita una clave de activación, gratuita y
+  ligada a la máquina, para añadir LB o nodos de clúster (`README.md:360-364`).
+- Una instalación comunitaria (crédito intacto) **nunca contacta el servidor de licencias**.
+  Un white-label contacta `https://www.xcvm.tech` para obtener la clave, revisar
+  revocaciones cada semana y hacer un *check-in* diario (`README.md:368-372`).
+
+**Lo que dice la guía** `docs/en/info/licensing-and-activation.md` (versión del 23-09-2026):
+- Para las funciones con licencia se necesitan **dos condiciones a la vez: el crédito Y una
+  clave** de activación. "Neither condition replaces the other" (`:9-16`).
+- La licencia es necesaria para **trabajar con varios servidores** (LB) (`:79-80`).
+- El panel verifica la clave **una vez al día** con el servidor de licencias (`:47-48`),
+  con 14 días para la primera verificación (`:55`).
+- Si la licencia caduca o se revoca, el main **desconecta los LB** (`:84`).
+
+**La contradicción:** según el README, con el crédito visible los LB son gratis y no hay
+contacto con el servidor. Según la guía, hace falta una clave además del crédito, y hay
+verificación diaria.
+
+**Qué dice el código:**
+- Los **comentarios** del PHP coinciden con el README:
+  - `LicenseGate::licensed()` se describe como "una instalación comunitaria que conserva el
+    crédito, **o** una white-label con clave válida" (`src/Core/License/LicenseGate.php:54-58`);
+  - el comentario de `server:install` habla de "un panel white-label sin licencia"
+    (`src/Cli/Commands/ServerInstallCommand.php:120-121`).
+  El código ejecutable, en cambio, no distingue entre comunidad y white-label: rechaza el LB
+  siempre que `licensed()` sea falso (`src/Cli/Commands/ServerInstallCommand.php:124-129`).
+- **El veredicto lo da código cerrado.** `licensed()` devuelve lo que diga
+  `\XC_VM::license_valid()` de la extensión `xcvm_core` (`src/Core/License/LicenseGate.php:67-68`).
+  **Si la extensión o ese método no están, devuelve `true`** (`src/Core/License/LicenseGate.php:71`).
+  La comprobación del crédito llama a `\XC_VM::verify_branding()`
+  (`src/Core/Integrity/AttributionGuard.php:58-59`). Según el comentario de
+  `src/Cli/Commands/ServerInstallCommand.php:122-123`, el permiso de BD de los LB lo da
+  `\XC_VM::db_grant()`, también cerrado. Desde el repo **no se puede confirmar** qué hacen.
+- El encabezado de la misma clase da una tercera versión: clave ligada al HWID,
+  revalidación **semanal** y **7 días** de gracia sin conexión
+  (`src/Core/License/LicenseGate.php:12-14`).
+- La licencia controla **también el daemon `xc_fanout`**, y no solo los LB. Sin licencia,
+  la entrega en vivo cae al camino legacy (`src/Core/License/LicenseGate.php:42-51`,
+  `src/Public/stream/live.php:131`, `src/Domain/Stream/StreamProcess.php:1540`). Ni el README
+  (que sí habla del fanout, pero solo de su consumo de RAM, `README.md:270-288`) ni la guía
+  relacionan el fanout con la licencia.
+- `php.ini` tiene una directiva `xcvm_core.server_url` con un valor ofuscado
+  (`src/bin/php/lib/php.ini:1910`). Qué hace la extensión con ella no es verificable.
+
+**Conclusión:**
+- Por fechas y por los comentarios del código, **la guía parece desactualizada respecto al
+  README**: crédito visible = gratis con LB; clave solo para white-label. Lo que hace de
+  verdad `xcvm_core` **sigue sin verificar**.
+- Que una instalación comunitaria **no** contacte el servidor de licencias **no es
+  verificable** desde el código: depende de `xcvm_core`.
+- **Cómo verificarlo en el laboratorio:** instalar sin clave, con el crédito intacto, y:
+  1. comprobar que `xcvm_core` está cargada y que `\XC_VM::license_valid()` existe, y
+     consultar su resultado directamente. Sin la extensión, `licensed()` devuelve `true` y
+     la falta del banner de activación (`src/Public/Views/admin/dashboard.php:76`) no
+     demostraría nada;
+  2. capturar el tráfico saliente (DNS y TLS hacia `xcvm.tech` u otros) durante al menos
+     **8 días**, para cubrir una posible revalidación semanal. Ojo: no ver tráfico durante
+     ese tiempo no prueba que "nunca" contacte;
+  3. añadir un LB de prueba;
+  4. comprobar que la entrega usa fanout.
+- Mientras no se verifique, **no se puede dar por hecho** que los LB funcionarán sin clave
+  ni que no habrá contacto externo.
 ---
 
 ## h) Instalador: qué toca y qué descarga
@@ -844,7 +913,7 @@ SHA-1, aceptando la primera que ve o una fijada (TOFU, `src/Cli/Commands/ServerI
 |---|---|---|---|
 | R1 | MariaDB 3306 y KeyDB 6379 escuchan en todas las interfaces y no hay firewall | Alto | g.2, h.3 |
 | R2 | Dependencia de binarios cuyo código no está en este repo: `xcvm_core.so`, ionCube, `xc_fanout`, `xc_agent`. No los podemos auditar desde aquí y vienen de `main`/`latest` sin firma | Alto | g.3, h.2 |
-| R3 | Sin licencia no se pueden instalar LB, y según la documentación el panel consulta un servidor de licencias externo una vez al día. Si ese servicio falla o cambia, ¿qué pasa con los LB? | Alto | g.3 |
+| R3 | **Licencia contradictoria y no verificable:** el README dice que con el crédito visible los LB son gratis y no hay contacto externo; la guía exige una clave y una verificación diaria. El veredicto lo da código cerrado (`xcvm_core`), que también controla el daemon fanout. Si el modelo cambia, los LB y el fanout podrían dejar de funcionar | Alto | g.4 |
 | R4 | El instalador es invasivo: sobrescribe configs de `/etc`, desactiva apache y el nginx del sistema, hace `curl\|bash` y deja `chattr +i`. Al instalar un LB, además desactiva AppArmor | Medio | h.3 |
 | R5 | La política "gana el nuevo" permite compartir cuentas por turnos (*ping-pong*) y no muestra el video de conexiones sobrepasadas | Medio (negocio) | c |
 | R6 | HLS on demand puede tardar más de 5 s y responder "not on air" en el primer intento | Medio (negocio) | b |
@@ -856,8 +925,10 @@ SHA-1, aceptando la primera que ve o una fijada (TOFU, `src/Cli/Commands/ServerI
 
 ### Preguntas abiertas
 
-1. **Licencia:** ¿vamos a usar balanceadores? ¿Tenemos o compraremos licencia de XC_VM?
-   ¿Qué datos envía exactamente al servidor de licencias?
+1. **Licencia:** ¿aceptamos mantener visible el crédito de Vateron Media? Según el README,
+   así los LB son gratis y no hay contacto externo, pero hay que verificarlo en el
+   laboratorio (g.4). ¿Necesitamos white-label? En ese caso hace falta una clave y el panel
+   contacta `xcvm.tech`.
 2. **Topología:** ¿cuántos LB tendremos? ¿Usaremos la API de clúster (recomendada: no expone
    3306/6379) o el modo legacy?
 3. **Formato de entrega:** ¿nuestras apps usan TS o HLS? Esto decide si llegar a ≤5 s es
