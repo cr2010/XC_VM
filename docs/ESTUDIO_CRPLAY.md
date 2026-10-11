@@ -696,7 +696,7 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
    sitio** que el binario, **sin firma** (`src/Cli/Commands/UpdateCommand.php:128-157`).
 7. Hay una clave por defecto `OPENSSL_EXTRA` en el código
    (`src/Core/Config/ConstantsInitializer.php:167`). `resolveOpensslExtra()` la sustituye por el
-   contenido del fichero (`src/Core/Config/ConstantsInitializer.php:68-72`), así que solo se usa si falta
+   contenido del fichero (`src/Core/Config/ConstantsInitializer.php:68-72`), así que solo se usa si falta (o está vacío)
    `config/openssl_extra`, que el instalador genera (`install:2121-2125`). **Verificar que el
    fichero existe.**
 
