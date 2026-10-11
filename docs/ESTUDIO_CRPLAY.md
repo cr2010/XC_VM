@@ -184,7 +184,7 @@ abre la fuente dos veces.
 | `seg_time` (duración del segmento HLS) | **10 s** (INSERT de `settings`) | `src/bin/install/database.sql:1780-1781`, `src/Domain/Stream/StreamProcess.php:520-528` |
 | `hls_init_time = min(2, seg_time)`: objetivo de duración del primer segmento | 2 s | `src/Domain/Stream/StreamProcess.php:1001` |
 | GOP de la fuente: si `ignore_keyframes=0` (por defecto), ffmpeg corta en keyframes; con `ignore_keyframes=1` usa `+split_by_time` | depende de la fuente | `src/Domain/Stream/StreamProcess.php:998` |
-| `client_prebuffer`: en el camino legacy TS **espera N segundos en frío**; con fanout se pasa al daemon como `prebuffer=` | 10 s | `src/Public/stream/live.php:606-615`, `:486-495` |
+| `client_prebuffer`: en el camino legacy TS, con on demand y cliente no *restreamer*, **espera a que la playlist acumule N segundos de contenido** (con tope `on_demand_wait_time` o hasta que caiga el productor); con fanout se pasa al daemon como `prebuffer=` | 10 s | `src/Public/stream/live.php:606-615`, `:486-495` |
 | Sondeo de ficheros cada 100 ms (no usa inotify) | — | `src/Streaming/AsyncFileOperations.php:197-212` |
 
 **Conclusión [inferido]:**
@@ -192,9 +192,11 @@ abre la fuente dos veces.
 - **TS por fanout:** PHP entrega en cuanto existe `_0.ts`. Lo que tarda el daemon en
   mandar el primer byte, y cómo aplica el `prebuffer`, es **[no determinable]** desde este
   repo. La meta de **≤5 s parece alcanzable, pero hay que medirla**.
-- **HLS** es el caso lento: necesita cerrar al menos un primer segmento (objetivo de 2 s,
-  ajustado a keyframes y leído a velocidad real por `-re`). Si el daemon necesita además su
-  propio segmento (objetivo `seg_time`=10), tardaría más: **[no determinable]**.
+- **HLS** es el caso lento. Con productor **ffmpeg**, hay que cerrar al menos un primer
+  segmento (objetivo de 2 s, ajustado a keyframes y leído a velocidad real por `-re`). Con
+  el **remuxer nativo** no se aplica `-re` (`src/Domain/Stream/StreamProcess.php:1249-1258`), y su
+  forma de segmentar es **[no determinable]**. Si el daemon necesita además su propio
+  segmento (objetivo `seg_time`=10), tardaría más: **[no determinable]**.
 
 ### b.4 Palancas para llegar a ≤5 s
 
@@ -278,8 +280,12 @@ antigüedad.
     siempre, si este vale 0), **rechaza una IP distinta de la ya conectada** (comparación
     por subred según `ip_subnet_match`) y le muestra el video "connected". **Solo en live**
     (`src/Public/stream/live.php:299-310`).
-  - El agente del clúster puede negar la admisión (`src/Domain/Stream/ConnectionTracker.php:1039-1041`);
-    en ese caso también se muestra el video "connected" (`src/Streaming/Auth/StreamAuth.php:147-181`).
+  - El agente del clúster puede negar la admisión (`src/Domain/Stream/ConnectionTracker.php:1039-1041`).
+    La respuesta depende del motivo (`src/Streaming/Auth/StreamAuth.php:173-179`): `EXPIRED` usa el
+    video de expirado; `BANNED`/`DISABLED`, el de baneado; una línea o clave HMAC
+    desconocida da error de credenciales; y `LIMIT`, `OFFLINE` u otro motivo muestran el
+    video "connected". Solo se ve el video si el ajuste está activo y el fichero existe
+    (`src/Streaming/Delivery/OffAirHandler.php:121-140`).
 
 ### c.3 ¿Se puede pasar del límite?
 
@@ -289,8 +295,12 @@ Sí, durante ventanas cortas:
    local; ~1–1,5 s con la API de clúster, `docs/adr/0004-cluster-api.md:925`).
 2. **En HLS solo cuenta la playlist.** Los segmentos no registran conexión: comprueban un
    fichero marcador de la conexión y la IP (`src/Public/stream/segment.php:130-135`,
-   `:162-171`). **[inferido]** Un dispositivo que ya cerró sigue contando entre 30 y ~90 s
-   (30 s de `STALE_AFTER` más el ciclo de 1 minuto de `cron:users`).
+   `:162-171`). Cuando `cron:users` hace la limpieza (rol `legacy`,
+   `src/bin/install/database.sql:506`), una conexión marcada `hls_end=1` se da por terminada en
+   seguida. Una **abandonada sin marca de cierre** se da por terminada tras 30 s sin pedir
+   playlist, salvo que el nodo limpie las suyas (`src/Cli/CronJobs/UsersCronJob.php:280-285`).
+   **[inferido]** En ese caso sigue contando entre 30 y ~90 s (30 s más el ciclo de
+   1 minuto del cron).
 3. El límite viaja en el token: `live.php` toma `user_info` de los datos del token
    (`src/Public/stream/live.php:76`) y usa su `max_connections` (`:299`). Un cambio del máximo
    no afecta a tokens ya emitidos (sí a `ConnectionAdmission`, que relee la línea,
@@ -310,8 +320,10 @@ Sí, durante ventanas cortas:
   y recibe un token (y uuid) nuevo (`src/Public/stream/auth.php:242`), en la práctica cada cambio
   de canal crea una fila nueva. El worker anterior se cierra cuando el cliente cierra el
   socket, o lo cierra el limitador con la misma prioridad IP+UA.
-- **VOD:** sin el daemon de ficheros, las peticiones `Range` sin uuid se emparejan con una
-  conexión existente por línea, UA, stream e IP (`src/Public/stream/vod.php:117-121`).
+- **VOD:** sin el daemon de ficheros, para las peticiones `Range` se arma un filtro por
+  línea (o clave HMAC), contenedor, UA, stream e IP. La IP se omite cuando
+  `ip_subnet_match` está activo y es IPv4 (`src/Public/stream/vod.php:117-121`). Ese filtro se usa
+  para reutilizar una conexión existente en vez de crear otra (`src/Public/stream/vod.php:117-143`).
 
 **Conclusión [inferido]:** el zapping normal no debería expulsar a otros aparatos, porque
 la prioridad IP+UA cierra primero la conexión anterior del mismo cliente. Detrás de un
@@ -345,7 +357,11 @@ mismo NAT (misma IP) y con el mismo UA, el sistema no distingue un aparato de ot
      con el mismo patrón que se usa para "expirado" en `src/Public/stream/auth.php:351-358`.
 3. **Comprobación definitiva** en `src/Public/stream/live.php:357` y `src/Public/stream/live.php:431`,
    `src/Public/stream/vod.php:161`, `src/Public/stream/timeshift.php:166` y `src/Public/stream/timeshift.php:239`,
-   justo antes de registrar la conexión, para cubrir las carreras.
+   justo antes de registrar la conexión. **Ojo:** comprobar y luego registrar no es
+   atómico, así que dos peticiones simultáneas podrían pasar las dos. Para garantizarlo
+   hace falta que contar y registrar sea una sola operación en el almacén autoritativo
+   (por ejemplo, un script Lua en Redis o una reserva serializada por línea, como ya hace
+   `ConnectionAdmission` con `RESV#`, `src/Domain/Cluster/ConnectionAdmission.php:610-621`).
 4. **Desactivar el "gana el nuevo"** cuando el modo sea `reject_new`. Los puntos que lo
    aplican son:
    - `StreamAuth::validateConnections` (`src/Streaming/Auth/StreamAuth.php:111-134`);
@@ -424,7 +440,8 @@ En `src/Public/Controllers/Api/PlayerApiController.php`:
 
 ### d.4 Dónde agregar los idiomas (propuesta)
 
-**Opción A, recomendada: un módulo propio y cero cambios en la API.**
+**Opción A, recomendada si el VOD se analiza en MAIN: un módulo propio y cero cambios en la
+API.**
 
 1. Crear un módulo `src/Modules/crplay_media/`. Debe escuchar
    `#[ListensTo(MediaAnalyzedEvent::class)]`, que se despacha en `src/Cli/CronJobs/VodCronJob.php:202`
@@ -437,9 +454,11 @@ En `src/Public/Controllers/Api/PlayerApiController.php`:
 
 Limitaciones de la opción A:
 
-- Los módulos solo existen en MAIN: el build de LB los excluye (`Makefile:25`). Si el
-  análisis corre en un LB con mode 2, a MAIN solo viajan las claves de `ANALYSIS_KEYS`
-  (`src/Domain/Stream/ContentSink.php:42`).
+- Los módulos solo existen en MAIN: el build de LB los excluye (`Makefile:25`). El evento
+  se despacha en el nodo donde corre `cron:vod` (`src/Cli/CronJobs/VodCronJob.php:202`), así que
+  **para VOD analizado en un LB la opción A no funciona**: a MAIN solo viajan las claves de
+  `ANALYSIS_KEYS` (`src/Domain/Stream/ContentSink.php:42`, `src/Domain/Cluster/EventIngest.php:652`).
+  En esa topología habría que usar la opción B o diseñar otro transporte.
 - `TmdbCron` borra las claves al refrescar. El módulo tendría que volver a escribirlas
   (por ejemplo, escuchando también el evento de TMDb, si existe; **[pendiente]**).
 - `player_api` se atiende con `StreamingRequestBootstrap` (`src/Public/index.php:173`,
@@ -590,7 +609,7 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
     genera un `location` de nginx por código, con lista blanca de IPs opcional
     (`src/Core/Auth/AuthRepository.php:115-175`).
   - **2FA TOTP** con 10 códigos de recuperación de un solo uso (`src/Core/Auth/TwoFactor.php:11`,
-    `:33`) y bloqueo tras 10 fallos en 900 s (`:24-30`).
+    `:33`) y bloqueo tras 10 fallos en 900 s (`:24-31`).
     reCAPTCHA está **apagado por defecto** (`src/bin/install/database.sql:1525`).
   - Anti-fuerza bruta: `login_flood` por IP en 24 h (`src/Core/Auth/Authenticator.php:243-251`).
 - **Líneas (clientes):**
@@ -600,15 +619,17 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
     `secure_stream_tokens=1`, `src/bin/install/database.sql:1773`). Sigue existiendo un formato *legacy*
     AES-CBC con IV fijo y sin MAC (`src/Core/Util/Encryption.php:33-66`).
   - Protección de fuerza bruta en streaming: `BruteforceGuard` registra la IP bloqueada
-    (`src/Core/Auth/BruteforceGuard.php:109-127`) y el cron de root la aplica con ipset
-    (`src/Cli/CronJobs/RootSignalsCronJob.php:242-244`).
+    (`src/Core/Auth/BruteforceGuard.php:109-127`) y el cron de root la aplica con ipset:
+    conjuntos `xcvm_block4`/`xcvm_block6` y una regla `iptables -m set … -j DROP`
+    (`src/Cli/CronJobs/RootSignalsCronJob.php:271`, `:304`, `:316`).
 - **API del panel:**
   - Tokens `xct_…` guardados como SHA-256 (`src/Core/Auth/ApiTokens.php:24`, `:47-66`).
   - El `api_key` *legacy* está **activo por defecto** y se compara en texto plano
     (`src/bin/install/database.sql:1486`, `src/Core/Auth/ApiTokens.php:75-99`).
   - Hay una acción `mysql_query` que ejecuta **SQL arbitrario**. Exige el permiso
-    `database` (`src/Public/Controllers/Api/AdminApiController.php:33`, despacho en `:290-291`) o un
-    token de alcance `full` con `allow_sql` (`src/Core/Auth/ApiTokens.php:111-113`).
+    `database` (`src/Public/Controllers/Api/AdminApiController.php:33`, despacho en `:290-291`) y,
+    **además**, si la petición usa un token, que sea de alcance `full` con `allow_sql`
+    (`src/Public/Controllers/Api/AdminApiController.php:239-240`, `src/Core/Auth/ApiTokens.php:105-113`).
 - **Entre servidores:** se describe en [a.4](#a4-main-y-balanceadores-lb).
 
 ### g.2 Qué expone a internet y qué puertos usa
@@ -648,7 +669,7 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
 1. **3306 y 6379 abiertos a internet** si no se pone un firewall. En `install` no hay
    ninguna llamada a ufw, iptables ni ipset: solo aparecen como nombres de paquetes
    (`install:48`, `:235`). El cron de root sí gestiona después las listas de bloqueo de ipset
-   (`src/Cli/CronJobs/RootSignalsCronJob.php:242-244`).
+   (`src/Cli/CronJobs/RootSignalsCronJob.php:271`, `:316`), pero eso no filtra puertos.
 2. El usuario de BD de la app tiene **`ALL PRIVILEGES ON mysql.*`**, la base de sistema
    con las tablas de usuarios y privilegios (`install:2089`, `:2098`). El `GRANT OPTION`
    es solo sobre `xc_vm.*` (`install:2090`, `:2099`). **[inferido]** Con escritura en
@@ -674,7 +695,8 @@ dump **anonimizado** de XUI.one y comparar conteos por tabla.
 6. **Integridad de las descargas:** se comprueba con MD5 o SHA256 publicados **en el mismo
    sitio** que el binario, **sin firma** (`src/Cli/Commands/UpdateCommand.php:128-157`).
 7. Hay una clave por defecto `OPENSSL_EXTRA` en el código
-   (`src/Core/Config/ConstantsInitializer.php:167`). Solo se usa si falta
+   (`src/Core/Config/ConstantsInitializer.php:167`). `resolveOpensslExtra()` la sustituye por el
+   contenido del fichero (`src/Core/Config/ConstantsInitializer.php:68-72`), así que solo se usa si falta
    `config/openssl_extra`, que el instalador genera (`install:2121-2125`). **Verificar que el
    fichero existe.**
 
