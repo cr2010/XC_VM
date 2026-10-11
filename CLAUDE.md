@@ -96,4 +96,4 @@ Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/ag
 
 ## Fork CRPLAY (cr2010/XC_VM)
 
-@CLAUDE.crplay.md
+@AGENTS.md
