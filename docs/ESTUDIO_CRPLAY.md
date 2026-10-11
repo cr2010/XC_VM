@@ -231,6 +231,28 @@ abre la fuente dos veces.
 sin `llod`, con `seg_time` en 2/4/10 y `read_native` en 0/1, sobre una fuente de prueba
 propia (por ejemplo, `tools/test-stream-generator`).
 
+### b.5 Requisitos para reducir el arranque on demand (meta ≤5 s)
+
+**Objetivo:** en un arranque en frío, que el cliente empiece a recibir datos en cuanto el
+productor los tenga, sin acumular buffer antes. Hoy XC_VM:
+- en el camino legacy intenta esperar a que la playlist acumule `client_prebuffer` segundos
+  (`src/Public/stream/live.php:606-615`);
+- con fanout le pasa ese prebuffer al daemon (`src/Public/stream/live.php:486-495`);
+- en on demand sin LLOD usa un `analyzeduration` de 10 s (`src/Domain/Stream/StreamProcess.php:619`).
+
+| # | Requisito | Tipo | Dónde (XC_VM) |
+|---|---|---|---|
+| R1 | Prebuffer **0** en arranque en frío (enviar en cuanto haya datos), configurable aparte del prebuffer normal | ajuste + código mínimo | `src/Public/stream/live.php:606-615`, `src/Public/stream/live.php:486-495` |
+| R2 | `analyzeduration` on demand configurable (por ejemplo 1–2 s) en vez de 10 s fijos sin LLOD | ajuste nuevo | `src/Domain/Stream/StreamProcess.php:619` |
+| R3 | Probar `llod=1` en canales on demand: análisis de 0,5 s (`src/Domain/Stream/StreamProcess.php:619`) y arranque LLOD del monitor (`src/Cli/Commands/MonitorCommand.php:338-351`) | configuración | ídem |
+| R4 | Evaluar `read_native=0` (y `read_native_hls=0` si la fuente es HLS) en fuentes en vivo, y comprobar que ninguna otra condición activa `-re` | configuración | `src/Domain/Stream/StreamProcess.php:958-959` |
+| R5 | `seg_time` de 2–4 s en vez de 10 | configuración | `src/bin/install/database.sql:1780-1781` |
+| R6 | En la espera inicial sin playlist, comprobar que el primer segmento (`_0.ts` o `_0.m4s`) ya **tiene datos** y no solo que existe; antes, verificar en qué punto empieza realmente el envío | código mínimo | `src/Public/stream/live.php:260-277` |
+| R7 | **Medir** el tiempo hasta el primer byte y hasta el primer frame, con la misma fuente, antes y después de cada cambio | prueba | — |
+
+R1, R2 y R6 tocan código de upstream: hacerlo con el menor cambio posible y documentarlo en
+su PR (ver `AGENTS.md`).
+
 ---
 
 ## c) Conexiones por línea y límites
@@ -830,6 +852,7 @@ SHA-1, aceptando la primera que ve o una fijada (TOFU, `src/Cli/Commands/ServerI
 | R8 | La migración desde XUI borra el admin inicial, no copia ajustes ni LB, y descarta columnas en silencio | Medio | f |
 | R9 | Usuario de BD con `ALL ON mysql.*` | Medio | g.3 |
 | R10 | Varios cambios deseados (límite de conexiones, idiomas) tocan código de upstream y ponen en riesgo la sincronización | Medio | c.5, d.4 |
+| R11 | **PHP 8.1 está fuera de soporte de seguridad desde el 31-12-2025** (https://www.php.net/eol.php). Composer simula la plataforma 8.1.33 (`src/composer.json:35`); la versión que se ejecuta de verdad viene del bundle de `XC_VM_Binaries` (ver a.1 y h.2) y hay que confirmarla en el laboratorio. Si es 8.1, pedir o preparar un bundle con una versión con soporte (8.3+) | Alto (si se confirma) | a.1 |
 
 ### Preguntas abiertas
 
