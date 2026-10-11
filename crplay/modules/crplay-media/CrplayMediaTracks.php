@@ -461,11 +461,18 @@ final class CrplayMediaTracks {
 
 	/**
 	 * A string safe for JSON and for the panel's 3-byte utf8 columns: invalid
-	 * UTF-8 replaced, characters outside the BMP (emoji…) dropped, length capped.
+	 * UTF-8 bytes dropped, characters outside the BMP (emoji…) dropped, length capped.
 	 */
 	private static function text(mixed $rValue, int $rMax): string {
-		$rValue = mb_scrub((string) $rValue, 'UTF-8');
-		$rValue = (string) preg_replace('/[\x{10000}-\x{10FFFF}]/u', '', $rValue);
-		return mb_substr(trim($rValue), 0, $rMax, 'UTF-8');
+		// PCRE only (no mbstring needed): keep the valid UTF-8 sequences of the
+		// Basic Multilingual Plane, which also drops 4-byte characters (emoji).
+		// Callers cap at a few hundred characters; the input is cut in bytes first
+		// so a huge tag never becomes a huge match list.
+		$rMax = min(1000, max(0, $rMax));
+		$rValue = substr(ltrim((string) $rValue), 0, $rMax * 4 + 16);
+		preg_match_all('/[\x00-\x7F]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]/', $rValue, $rMatches);
+		$rValue = trim(implode('', $rMatches[0]));
+		preg_match('/^.{0,' . $rMax . '}/us', $rValue, $rCut);
+		return trim($rCut[0] ?? '');
 	}
 }

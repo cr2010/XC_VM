@@ -75,7 +75,7 @@ significativas pueden redondearse. `cron:vod` del núcleo hace lo mismo con este
 
 El bloqueo solo coordina al módulo consigo mismo (`cron:vod` y `cron:crplay_media`
 ejecutando código del módulo). Las escrituras del propio núcleo no lo usan; por eso la
-escritura es optimista. Los títulos de pista se limpian: UTF-8 inválido reemplazado, emojis quitados (las
+escritura es optimista. Los títulos de pista se limpian: bytes de UTF-8 inválido eliminados, emojis quitados (las
 tablas del panel son `utf8` de 3 bytes) y longitud limitada.
 
 ## Limitaciones

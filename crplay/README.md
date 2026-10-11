@@ -6,6 +6,7 @@ se sincroniza con `Vateron-Media/XC_VM` sin conflictos.
 | Carpeta | Qué hay |
 |---|---|
 | `modules/` | Módulos de XC_VM. Se instalan subiendo un ZIP en **Modules** (ver el README de cada uno) |
+| `tests/` | Pruebas sin base de datos: `php crplay/tests/crplay_media_test.php` (desde la raíz del repo; necesita `php-cli`) |
 
 Módulos:
 
